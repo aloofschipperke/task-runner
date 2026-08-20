@@ -1,0 +1,163 @@
+# Single custom SSM Automation Document covering the end-to-end pipeline:
+# patch the base AMI, install the task-runner setup (users/units/sudoers/
+# binaries) onto it, bake the primary-region golden AMI, copy it to the
+# failover region, and publish the resolved AMI ID to Parameter Store in
+# both regions.
+#
+# This is the SOURCE template. Do not hand-edit ../golden-image-pipeline.yml --
+# it's generated from this file plus systemd/, sudoers.d/, bin/, and
+# scripts/bootstrap-golden-image.sh by scripts/generate-golden-image-pipeline.py.
+description: "Bake golden image, replicate cross-region, publish Parameter Store pointers"
+schemaVersion: "0.3"
+assumeRole: "{{ AutomationAssumeRole }}"
+
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: "IAM role SSM assumes to run this automation (see iam/automation-role-*.json)"
+  SourceAmiId:
+    type: String
+    description: "Baseline AMI to boot the temporary build instance from"
+  LaunchTemplateId:
+    type: String
+    default: "lt-0123456789abcdef0"
+  PrimaryRegion:
+    type: String
+    default: "us-east-1"
+  BackupRegion:
+    type: String
+    default: "us-west-2"
+  ParameterName:
+    type: String
+    default: "/images/golden-ami-latest"
+  SecurityGroupIds:
+    type: StringList
+    description: "Security groups for the temp build instance"
+
+mainSteps:
+  # AWS-UpdateLinuxAmi is NOT used here: it's a fully self-contained document
+  # that launches its own instance (ignoring our Launch Template), creates
+  # its own final AMI, and terminates the instance itself before returning --
+  # there's no window in which to run BootstrapTaskRunnerAssets against it,
+  # and the AMI it produces would have OS patches but none of our task-runner
+  # setup baked in. We own the whole temp-instance lifecycle instead.
+  - name: LaunchTempInstance
+    action: aws:runInstances
+    inputs:
+      ImageId: "{{ SourceAmiId }}"
+      LaunchTemplate:
+        LaunchTemplateId: "{{ LaunchTemplateId }}"
+        Version: "$Latest"
+      SecurityGroupIds: "{{ SecurityGroupIds }}"
+      MinInstanceCount: 1
+      MaxInstanceCount: 1
+    outputs:
+      - Name: InstanceId
+        Selector: "$.InstanceIds[0]"
+        Type: String
+
+  - name: WaitUntilInstanceManaged
+    action: aws:waitForAwsResourceProperty
+    inputs:
+      Service: ssm
+      Api: DescribeInstanceInformation
+      InstanceInformationFilterList:
+        - key: InstanceIds
+          valueSet:
+            - "{{ LaunchTempInstance.InstanceId }}"
+      PropertySelector: "$.InstanceInformationList[0].PingStatus"
+      DesiredValues:
+        - "Online"
+
+  - name: PatchOSPackages
+    action: aws:runCommand
+    inputs:
+      DocumentName: "AWS-RunPatchBaseline"
+      InstanceIds:
+        - "{{ LaunchTempInstance.InstanceId }}"
+      Parameters:
+        Operation: "Install"
+
+  - name: BootstrapTaskRunnerAssets
+    # Push method (per NOTES.md): every asset here is small plain text, well
+    # under the Run Command payload limit, so it's embedded directly in the
+    # document instead of round-tripping through S3. This block is generated
+    # -- see the header comment at the top of this file.
+    action: aws:runCommand
+    inputs:
+      DocumentName: "AWS-RunShellScript"
+      InstanceIds:
+        - "{{ LaunchTempInstance.InstanceId }}"
+      Parameters:
+        commands:
+          - |
+__BOOTSTRAP_COMMANDS__
+
+  - name: CreatePrimaryImage
+    action: aws:createImage
+    inputs:
+      InstanceId: "{{ LaunchTempInstance.InstanceId }}"
+      ImageName: "golden-image-{{ global:DATE_TIME }}"
+      # NoReboot: false stops the instance, images it, and restarts it for
+      # us -- no separate stop step needed before imaging.
+      NoReboot: false
+
+  - name: TerminateTempInstance
+    # We launched this instance ourselves (see LaunchTempInstance above), so
+    # we're responsible for cleaning it up -- AWS-UpdateLinuxAmi used to do
+    # this implicitly, but we no longer delegate to it.
+    action: aws:changeInstanceState
+    inputs:
+      InstanceIds:
+        - "{{ LaunchTempInstance.InstanceId }}"
+      DesiredState: "terminated"
+
+  - name: CopyImageToBackupRegion
+    action: aws:executeAwsApi
+    inputs:
+      Service: ec2
+      Api: CopyImage
+      Region: "{{ BackupRegion }}"
+      SourceRegion: "{{ PrimaryRegion }}"
+      SourceImageId: "{{ CreatePrimaryImage.ImageId }}"
+      Name: "golden-image-{{ global:DATE_TIME }}-copy"
+      # Re-encrypts the snapshot with the destination region's own KMS key
+      Encrypted: true
+    outputs:
+      - Name: BackupAmiId
+        Selector: "$.ImageId"
+        Type: String
+
+  - name: WaitForBackupImageAvailable
+    action: aws:waitForAwsResourceProperty
+    inputs:
+      Service: ec2
+      Api: DescribeImages
+      Region: "{{ BackupRegion }}"
+      ImageIds:
+        - "{{ CopyImageToBackupRegion.BackupAmiId }}"
+      PropertySelector: "$.Images[0].State"
+      DesiredValues:
+        - "available"
+
+  - name: PublishPrimaryParameter
+    action: aws:executeAwsApi
+    inputs:
+      Service: ssm
+      Api: PutParameter
+      Region: "{{ PrimaryRegion }}"
+      Name: "{{ ParameterName }}"
+      Value: "{{ CreatePrimaryImage.ImageId }}"
+      Type: "String"
+      Overwrite: true
+
+  - name: PublishBackupParameter
+    action: aws:executeAwsApi
+    inputs:
+      Service: ssm
+      Api: PutParameter
+      Region: "{{ BackupRegion }}"
+      Name: "{{ ParameterName }}"
+      Value: "{{ CopyImageToBackupRegion.BackupAmiId }}"
+      Type: "String"
+      Overwrite: true

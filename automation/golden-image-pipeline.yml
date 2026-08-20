@@ -1,0 +1,314 @@
+# GENERATED FILE -- do not hand-edit.
+# Source: golden-image-pipeline.yml.tmpl + systemd/, sudoers.d/, bin/,
+# scripts/bootstrap-golden-image.sh. Regenerate with:
+#   scripts/generate-golden-image-pipeline.py
+# Single custom SSM Automation Document covering the end-to-end pipeline:
+# patch the base AMI, install the task-runner setup (users/units/sudoers/
+# binaries) onto it, bake the primary-region golden AMI, copy it to the
+# failover region, and publish the resolved AMI ID to Parameter Store in
+# both regions.
+#
+# This is the SOURCE template. Do not hand-edit ../golden-image-pipeline.yml --
+# it's generated from this file plus systemd/, sudoers.d/, bin/, and
+# scripts/bootstrap-golden-image.sh by scripts/generate-golden-image-pipeline.py.
+description: "Bake golden image, replicate cross-region, publish Parameter Store pointers"
+schemaVersion: "0.3"
+assumeRole: "{{ AutomationAssumeRole }}"
+
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: "IAM role SSM assumes to run this automation (see iam/automation-role-*.json)"
+  SourceAmiId:
+    type: String
+    description: "Baseline AMI to boot the temporary build instance from"
+  LaunchTemplateId:
+    type: String
+    default: "lt-0123456789abcdef0"
+  PrimaryRegion:
+    type: String
+    default: "us-east-1"
+  BackupRegion:
+    type: String
+    default: "us-west-2"
+  ParameterName:
+    type: String
+    default: "/images/golden-ami-latest"
+  SecurityGroupIds:
+    type: StringList
+    description: "Security groups for the temp build instance"
+
+mainSteps:
+  # AWS-UpdateLinuxAmi is NOT used here: it's a fully self-contained document
+  # that launches its own instance (ignoring our Launch Template), creates
+  # its own final AMI, and terminates the instance itself before returning --
+  # there's no window in which to run BootstrapTaskRunnerAssets against it,
+  # and the AMI it produces would have OS patches but none of our task-runner
+  # setup baked in. We own the whole temp-instance lifecycle instead.
+  - name: LaunchTempInstance
+    action: aws:runInstances
+    inputs:
+      ImageId: "{{ SourceAmiId }}"
+      LaunchTemplate:
+        LaunchTemplateId: "{{ LaunchTemplateId }}"
+        Version: "$Latest"
+      SecurityGroupIds: "{{ SecurityGroupIds }}"
+      MinInstanceCount: 1
+      MaxInstanceCount: 1
+    outputs:
+      - Name: InstanceId
+        Selector: "$.InstanceIds[0]"
+        Type: String
+
+  - name: WaitUntilInstanceManaged
+    action: aws:waitForAwsResourceProperty
+    inputs:
+      Service: ssm
+      Api: DescribeInstanceInformation
+      InstanceInformationFilterList:
+        - key: InstanceIds
+          valueSet:
+            - "{{ LaunchTempInstance.InstanceId }}"
+      PropertySelector: "$.InstanceInformationList[0].PingStatus"
+      DesiredValues:
+        - "Online"
+
+  - name: PatchOSPackages
+    action: aws:runCommand
+    inputs:
+      DocumentName: "AWS-RunPatchBaseline"
+      InstanceIds:
+        - "{{ LaunchTempInstance.InstanceId }}"
+      Parameters:
+        Operation: "Install"
+
+  - name: BootstrapTaskRunnerAssets
+    # Push method (per NOTES.md): every asset here is small plain text, well
+    # under the Run Command payload limit, so it's embedded directly in the
+    # document instead of round-tripping through S3. This block is generated
+    # -- see the header comment at the top of this file.
+    action: aws:runCommand
+    inputs:
+      DocumentName: "AWS-RunShellScript"
+      InstanceIds:
+        - "{{ LaunchTempInstance.InstanceId }}"
+      Parameters:
+        commands:
+          - |
+            set -euo pipefail
+            mkdir -p /tmp/task-runner-assets/systemd /tmp/task-runner-assets/sudoers.d /tmp/task-runner-assets/bin /tmp/task-runner-assets/scripts
+
+            cat <<'EOF_UNIT1' > /tmp/task-runner-assets/systemd/task-runner-user1.service
+            [Unit]
+            Description=Task Runner One (Protected Parameter Reader)
+            After=network.target cloud-init.service
+
+            [Service]
+            Type=simple
+            User=user1
+            Group=user1
+            EnvironmentFile=/etc/task_runner_1/config
+            ExecStart=/usr/local/bin/runner1 --id ${JOB_ID}
+
+            # Filesystem containment (NoNewPrivileges intentionally omitted: user1 needs
+            # `sudo systemctl start task-runner-user2.service` to trigger the broker path)
+            ProtectSystem=strict
+            PrivateTmp=true
+            ProtectHome=true
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF_UNIT1
+
+            cat <<'EOF_UNIT2' > /tmp/task-runner-assets/systemd/task-runner-user2.service
+            [Unit]
+            Description=Task Runner Two (Strictly Contained Sandbox)
+            RefuseManualStop=no
+            # No [Install] section: user2's runner must never auto-start at boot,
+            # it is only ever started by user1 via the sudoers broker path.
+
+            [Service]
+            Type=simple
+            User=user2
+            Group=user2
+            ExecStart=/usr/local/bin/runner2
+
+            # Network containment: block the EC2/IMDS metadata endpoint at the kernel level
+            IPAddressDeny=169.254.169.254
+
+            # Filesystem containment
+            ProtectHome=true
+            PrivateTmp=true
+            ProtectSystem=strict
+            # Masks user1's parameter directory with an empty overlay, even under
+            # privilege escalation inside user2's own sandbox.
+            TemporaryFileSystem=/etc/task_runner_1
+
+            # Kernel / process isolation
+            NoNewPrivileges=true
+            ProtectControlGroups=true
+            KernelTunables=true
+            RestrictRealtime=true
+
+            # Log isolation: route to a file only user1/root can read, keep user2 out
+            # of the systemd-journal / adm groups on the golden image.
+            StandardOutput=file:/var/log/runner2.log
+            StandardError=file:/var/log/runner2.log
+            SyslogIdentifier=task-runner-user2
+            ProtectKernelLogs=true
+            EOF_UNIT2
+
+            cat <<'EOF_SUDOERS' > /tmp/task-runner-assets/sudoers.d/task_runners
+            # Allow user1 to start user2's service, but NOTHING ELSE. No password required.
+            # Routing through `sudo systemctl start` (rather than `su user2 -c ...`) means
+            # systemd -- not user1's shell -- spawns user2's process, so user1's
+            # environment/context never leaks across the boundary.
+            # --wait blocks until task-runner-user2 deactivates, so runner1 knows when
+            # runner2 has actually finished rather than just that the start job landed.
+            # sudoers matches the command line verbatim, so --wait must be whitelisted
+            # explicitly here to match what runner1.sh invokes.
+            user1 ALL=(root) NOPASSWD: /usr/bin/systemctl start --wait task-runner-user2.service
+            EOF_SUDOERS
+
+            cat <<'EOF_RUNNER1' > /tmp/task-runner-assets/bin/runner1.sh
+            #!/bin/bash
+            # Task Runner One: reads its isolated job config, does its work, then
+            # triggers Task Runner Two through the systemd broker (never execs it
+            # directly, so user2 never inherits user1's environment).
+            set -euo pipefail
+
+            JOB_ID="${1:-${JOB_ID:-}}"
+            if [[ "$1" == "--id" ]]; then
+                JOB_ID="$2"
+            fi
+
+            echo "runner1: starting job ${JOB_ID}"
+
+            # ... user1's own work goes here ...
+
+            echo "runner1: triggering task-runner-user2 via broker (blocking until it finishes)"
+            sudo /usr/bin/systemctl start --wait task-runner-user2.service || true
+
+            # `--wait` only tells us the unit reached "failed" (exit 1) vs deactivated
+            # cleanly (exit 0); pull runner2's actual exit code separately.
+            runner2_exit="$(systemctl show task-runner-user2.service -p ExecMainStatus --value)"
+            echo "runner1: task-runner-user2 finished with exit code ${runner2_exit}"
+
+            if [[ "${runner2_exit}" -ne 0 ]]; then
+                echo "runner1: task-runner-user2 failed" >&2
+                exit "${runner2_exit}"
+            fi
+            EOF_RUNNER1
+
+            cat <<'EOF_RUNNER2' > /tmp/task-runner-assets/bin/runner2.sh
+            #!/bin/bash
+            # Task Runner Two: runs fully sandboxed (see systemd/task-runner-user2.service).
+            # Has no access to /etc/task_runner_1, no metadata IP access, and no journal
+            # read access -- it only ever sees what systemd hands it on ExecStart.
+            set -euo pipefail
+
+            echo "runner2: starting sandboxed work"
+
+            # ... user2's own work goes here ...
+            EOF_RUNNER2
+
+            cat <<'EOF_BOOTSTRAP' > /tmp/task-runner-assets/scripts/bootstrap-golden-image.sh
+            #!/bin/bash
+            # Run once while baking the golden AMI (as root, via the SSM Automation
+            # document's inner command/patch step). Creates the two isolated service
+            # users and installs the systemd units / sudoers exception / runner binaries.
+            set -euo pipefail
+
+            # Two unprivileged, non-login system users
+            useradd -m -s /sbin/nologin user1
+            useradd -m -s /sbin/nologin user2
+
+            # IMPORTANT: never add user2 to adm / systemd-journal / wheel, so a plain
+            # `journalctl` as user2 fails with "Permission denied".
+
+            install -m 0644 systemd/task-runner-user1.service /etc/systemd/system/task-runner-user1.service
+            install -m 0644 systemd/task-runner-user2.service /etc/systemd/system/task-runner-user2.service
+
+            install -m 0440 sudoers.d/task_runners /etc/sudoers.d/task_runners
+            visudo -cf /etc/sudoers.d/task_runners
+
+            install -m 0755 bin/runner1.sh /usr/local/bin/runner1
+            install -m 0755 bin/runner2.sh /usr/local/bin/runner2
+
+            systemctl daemon-reload
+
+            echo "bootstrap-golden-image: done. task-runner-user1 will be enabled at boot via cloud-init; task-runner-user2 is left disabled/idle."
+            EOF_BOOTSTRAP
+
+            chmod +x /tmp/task-runner-assets/bin/*.sh /tmp/task-runner-assets/scripts/bootstrap-golden-image.sh
+            cd /tmp/task-runner-assets && bash scripts/bootstrap-golden-image.sh
+            rm -rf /tmp/task-runner-assets
+
+  - name: CreatePrimaryImage
+    action: aws:createImage
+    inputs:
+      InstanceId: "{{ LaunchTempInstance.InstanceId }}"
+      ImageName: "golden-image-{{ global:DATE_TIME }}"
+      # NoReboot: false stops the instance, images it, and restarts it for
+      # us -- no separate stop step needed before imaging.
+      NoReboot: false
+
+  - name: TerminateTempInstance
+    # We launched this instance ourselves (see LaunchTempInstance above), so
+    # we're responsible for cleaning it up -- AWS-UpdateLinuxAmi used to do
+    # this implicitly, but we no longer delegate to it.
+    action: aws:changeInstanceState
+    inputs:
+      InstanceIds:
+        - "{{ LaunchTempInstance.InstanceId }}"
+      DesiredState: "terminated"
+
+  - name: CopyImageToBackupRegion
+    action: aws:executeAwsApi
+    inputs:
+      Service: ec2
+      Api: CopyImage
+      Region: "{{ BackupRegion }}"
+      SourceRegion: "{{ PrimaryRegion }}"
+      SourceImageId: "{{ CreatePrimaryImage.ImageId }}"
+      Name: "golden-image-{{ global:DATE_TIME }}-copy"
+      # Re-encrypts the snapshot with the destination region's own KMS key
+      Encrypted: true
+    outputs:
+      - Name: BackupAmiId
+        Selector: "$.ImageId"
+        Type: String
+
+  - name: WaitForBackupImageAvailable
+    action: aws:waitForAwsResourceProperty
+    inputs:
+      Service: ec2
+      Api: DescribeImages
+      Region: "{{ BackupRegion }}"
+      ImageIds:
+        - "{{ CopyImageToBackupRegion.BackupAmiId }}"
+      PropertySelector: "$.Images[0].State"
+      DesiredValues:
+        - "available"
+
+  - name: PublishPrimaryParameter
+    action: aws:executeAwsApi
+    inputs:
+      Service: ssm
+      Api: PutParameter
+      Region: "{{ PrimaryRegion }}"
+      Name: "{{ ParameterName }}"
+      Value: "{{ CreatePrimaryImage.ImageId }}"
+      Type: "String"
+      Overwrite: true
+
+  - name: PublishBackupParameter
+    action: aws:executeAwsApi
+    inputs:
+      Service: ssm
+      Api: PutParameter
+      Region: "{{ BackupRegion }}"
+      Name: "{{ ParameterName }}"
+      Value: "{{ CopyImageToBackupRegion.BackupAmiId }}"
+      Type: "String"
+      Overwrite: true

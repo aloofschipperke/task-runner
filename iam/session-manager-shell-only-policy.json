@@ -1,0 +1,28 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowInteractiveShellAccess",
+            "Effect": "Allow",
+            "Action": "ssm:StartSession",
+            "Resource": [
+                "arn:aws:ec2:*:123456789012:instance/*",
+                "arn:aws:ssm:*::document/SSM-SessionManagerRunShell"
+            ],
+            "Condition": {
+                "BoolIfExists": {
+                    "ssm:SessionDocumentAccessCheck": "true"
+                }
+            }
+        },
+        {
+            "Sid": "DenyPortForwardingAndTunneling",
+            "Effect": "Deny",
+            "Action": "ssm:StartSession",
+            "Resource": [
+                "arn:aws:ssm:*::document/AWS-StartPortForwardingSession",
+                "arn:aws:ssm:*::document/AWS-StartPortForwardingSessionToRemoteHost"
+            ]
+        }
+    ]
+}

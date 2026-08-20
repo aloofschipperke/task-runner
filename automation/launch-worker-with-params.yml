@@ -1,0 +1,51 @@
+# Launches a worker instance from the Launch Template, injecting per-job
+# parameters into User Data (Push method) so cloud-init can hand them to
+# the task-runner-user1 systemd service at boot.
+description: "Launch Instance with Task Runner Params"
+schemaVersion: "0.3"
+parameters:
+  JobId:
+    type: String
+    description: "The ID of the job for the task runner"
+  LaunchTemplateId:
+    type: String
+    default: "lt-0123456789abcdef0"
+
+mainSteps:
+  - name: LaunchWorker
+    action: aws:executeAwsApi
+    inputs:
+      Service: ec2
+      Api: RunInstances
+      LaunchTemplate:
+        LaunchTemplateId: "{{ LaunchTemplateId }}"
+        Version: "$Latest"
+      UserData:
+        Fn::Base64: |
+          #cloud-config
+          write_files:
+            - path: /etc/task_runner_1/config
+              owner: user1:user1
+              permissions: '0640'
+              content: |
+                JOB_ID={{ JobId }}
+                REGION={{ global:REGION }}
+
+          runcmd:
+            # Lock down the directory as well as the file (write_files only sets file perms)
+            - chmod 750 /etc/task_runner_1
+            - chown -R user1:user1 /etc/task_runner_1
+
+            # Prepare user2's private log file, writable only by the log router (root/user1)
+            - touch /var/log/runner2.log
+            - chown user1:user1 /var/log/runner2.log
+            - chmod 600 /var/log/runner2.log
+
+            # Only enable and start User 1 at boot; User 2 stays idle until triggered
+            - systemctl daemon-reload
+            - systemctl enable --now task-runner-user1.service
+
+            # Self-destruct the cloud-init user-data cache so User 2 can't read the
+            # JOB_ID/REGION values back out of the local instance metadata history
+            - rm -rf /var/lib/cloud/instances/*/user-data.txt
+            - rm -rf /var/lib/cloud/instances/*/user-data.txt.bin

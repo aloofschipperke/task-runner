@@ -1,0 +1,19 @@
+[Unit]
+Description=Task Runner One (Protected Parameter Reader)
+After=network.target cloud-init.service
+
+[Service]
+Type=simple
+User=user1
+Group=user1
+EnvironmentFile=/etc/task_runner_1/config
+ExecStart=/usr/local/bin/runner1 --id ${JOB_ID}
+
+# Filesystem containment (NoNewPrivileges intentionally omitted: user1 needs
+# `sudo systemctl start task-runner-user2.service` to trigger the broker path)
+ProtectSystem=strict
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

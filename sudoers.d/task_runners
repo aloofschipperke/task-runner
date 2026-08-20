@@ -1,0 +1,9 @@
+# Allow user1 to start user2's service, but NOTHING ELSE. No password required.
+# Routing through `sudo systemctl start` (rather than `su user2 -c ...`) means
+# systemd -- not user1's shell -- spawns user2's process, so user1's
+# environment/context never leaks across the boundary.
+# --wait blocks until task-runner-user2 deactivates, so runner1 knows when
+# runner2 has actually finished rather than just that the start job landed.
+# sudoers matches the command line verbatim, so --wait must be whitelisted
+# explicitly here to match what runner1.sh invokes.
+user1 ALL=(root) NOPASSWD: /usr/bin/systemctl start --wait task-runner-user2.service

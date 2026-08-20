@@ -1,0 +1,35 @@
+[Unit]
+Description=Task Runner Two (Strictly Contained Sandbox)
+RefuseManualStop=no
+# No [Install] section: user2's runner must never auto-start at boot,
+# it is only ever started by user1 via the sudoers broker path.
+
+[Service]
+Type=simple
+User=user2
+Group=user2
+ExecStart=/usr/local/bin/runner2
+
+# Network containment: block the EC2/IMDS metadata endpoint at the kernel level
+IPAddressDeny=169.254.169.254
+
+# Filesystem containment
+ProtectHome=true
+PrivateTmp=true
+ProtectSystem=strict
+# Masks user1's parameter directory with an empty overlay, even under
+# privilege escalation inside user2's own sandbox.
+TemporaryFileSystem=/etc/task_runner_1
+
+# Kernel / process isolation
+NoNewPrivileges=true
+ProtectControlGroups=true
+KernelTunables=true
+RestrictRealtime=true
+
+# Log isolation: route to a file only user1/root can read, keep user2 out
+# of the systemd-journal / adm groups on the golden image.
+StandardOutput=file:/var/log/runner2.log
+StandardError=file:/var/log/runner2.log
+SyslogIdentifier=task-runner-user2
+ProtectKernelLogs=true

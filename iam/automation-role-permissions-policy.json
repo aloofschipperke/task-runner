@@ -1,0 +1,105 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "EC2RunInstancesWithLaunchTemplate",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:RunInstances"
+            ],
+            "Resource": [
+                "arn:aws:ec2:*:123456789012:launch-template/*",
+                "arn:aws:ec2:*:123456789012:instance/*",
+                "arn:aws:ec2:*:123456789012:subnet/*",
+                "arn:aws:ec2:*:123456789012:security-group/*",
+                "arn:aws:ec2:*:123456789012:volume/*",
+                "arn:aws:ec2:*:*:image/*"
+            ]
+        },
+        {
+            "Sid": "PassRoleToEC2Instances",
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": "arn:aws:iam::123456789012:role/Your-EC2-Instance-Profile-Role",
+            "Condition": {
+                "StringEquals": {
+                    "iam:PassedToService": "ec2.amazonaws.com"
+                }
+            }
+        },
+        {
+            "Sid": "CreateAndCopyGoldenImage",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:CreateImage",
+                "ec2:CopyImage"
+            ],
+            "Resource": [
+                "arn:aws:ec2:*:123456789012:instance/*",
+                "arn:aws:ec2:*:*:image/*",
+                "arn:aws:ec2:*:*:snapshot/*"
+            ]
+        },
+        {
+            "Sid": "DescribeImagesForCopyWait",
+            "Effect": "Allow",
+            "Action": "ec2:DescribeImages",
+            "Resource": "*"
+        },
+        {
+            "Sid": "RunCommandForTaskRunnerBootstrap",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:SendCommand"
+            ],
+            "Resource": [
+                "arn:aws:ssm:*::document/AWS-RunShellScript",
+                "arn:aws:ssm:*::document/AWS-RunPatchBaseline",
+                "arn:aws:ec2:*:123456789012:instance/*"
+            ]
+        },
+        {
+            "Sid": "ReadCommandInvocationStatus",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:GetCommandInvocation",
+                "ssm:ListCommandInvocations"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "WaitForInstanceManaged",
+            "Effect": "Allow",
+            "Action": "ssm:DescribeInstanceInformation",
+            "Resource": "*"
+        },
+        {
+            "Sid": "TerminateTempBuildInstance",
+            "Effect": "Allow",
+            "Action": "ec2:TerminateInstances",
+            "Resource": "arn:aws:ec2:*:123456789012:instance/*"
+        },
+        {
+            "Sid": "DescribeInstancesForLifecyclePolling",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:DescribeInstances",
+                "ec2:DescribeInstanceStatus"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "CrossRegionParameterStoreManagement",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:PutParameter",
+                "ssm:GetParameter",
+                "ssm:GetParameters"
+            ],
+            "Resource": [
+                "arn:aws:ssm:us-east-1:123456789012:parameter/images/golden-ami-latest",
+                "arn:aws:ssm:us-west-2:123456789012:parameter/images/golden-ami-latest"
+            ]
+        }
+    ]
+}
