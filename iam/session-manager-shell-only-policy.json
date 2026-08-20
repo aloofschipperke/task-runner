@@ -21,7 +21,8 @@
             "Action": "ssm:StartSession",
             "Resource": [
                 "arn:aws:ssm:*::document/AWS-StartPortForwardingSession",
-                "arn:aws:ssm:*::document/AWS-StartPortForwardingSessionToRemoteHost"
+                "arn:aws:ssm:*::document/AWS-StartPortForwardingSessionToRemoteHost",
+                "arn:aws:ssm:*::document/AWS-StartSSHSession"
             ]
         }
     ]

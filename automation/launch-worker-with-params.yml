@@ -36,10 +36,11 @@ mainSteps:
             - chmod 750 /etc/task_runner_1
             - chown -R user1:user1 /etc/task_runner_1
 
-            # Prepare user2's private log file, writable only by the log router (root/user1)
+            # Prepare user2's private log file, readable by user1 and cloudwatch agent
             - touch /var/log/runner2.log
             - chown user1:user1 /var/log/runner2.log
-            - chmod 600 /var/log/runner2.log
+            - chmod 640 /var/log/runner2.log
+            - usermod -aG user1 cwagent || true
 
             # Only enable and start User 1 at boot; User 2 stays idle until triggered
             - systemctl daemon-reload

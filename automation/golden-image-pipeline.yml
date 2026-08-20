@@ -96,7 +96,7 @@ mainSteps:
         commands:
           - |
             set -euo pipefail
-            mkdir -p /tmp/task-runner-assets/systemd /tmp/task-runner-assets/sudoers.d /tmp/task-runner-assets/bin /tmp/task-runner-assets/scripts
+            mkdir -p /tmp/task-runner-assets/systemd /tmp/task-runner-assets/sudoers.d /tmp/task-runner-assets/bin /tmp/task-runner-assets/scripts /tmp/task-runner-assets/cloudwatch
 
             cat <<'EOF_UNIT1' > /tmp/task-runner-assets/systemd/task-runner-user1.service
             [Unit]
@@ -186,11 +186,20 @@ mainSteps:
 
             # ... user1's own work goes here ...
 
+            echo "runner1: querying task-runner-user2 status prior to execution"
+            prev_invocation="$(systemctl show task-runner-user2.service -p InvocationID --value)"
+
             echo "runner1: triggering task-runner-user2 via broker (blocking until it finishes)"
             sudo /usr/bin/systemctl start --wait task-runner-user2.service || true
 
-            # `--wait` only tells us the unit reached "failed" (exit 1) vs deactivated
-            # cleanly (exit 0); pull runner2's actual exit code separately.
+            curr_invocation="$(systemctl show task-runner-user2.service -p InvocationID --value)"
+
+            if [[ -z "${curr_invocation}" || "${curr_invocation}" == "${prev_invocation}" ]]; then
+                echo "runner1: error: task-runner-user2.service failed to initiate" >&2
+                exit 255
+            fi
+
+            # Query the precise exit code of the execution
             runner2_exit="$(systemctl show task-runner-user2.service -p ExecMainStatus --value)"
             echo "runner1: task-runner-user2 finished with exit code ${runner2_exit}"
 
@@ -237,8 +246,39 @@ mainSteps:
 
             systemctl daemon-reload
 
+            # Install Amazon CloudWatch Agent (RPM-based, compatible with AL2023 and RHEL)
+            echo "bootstrap-golden-image: installing amazon-cloudwatch-agent..."
+            curl -s -O https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+            rpm -U ./amazon-cloudwatch-agent.rpm
+            rm -f amazon-cloudwatch-agent.rpm
+
+            # Deploy the CloudWatch Agent configuration
+            mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+            install -m 0644 cloudwatch/cloudwatch-agent-config.json /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+            # Fetch configuration and start/enable the agent
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
             echo "bootstrap-golden-image: done. task-runner-user1 will be enabled at boot via cloud-init; task-runner-user2 is left disabled/idle."
             EOF_BOOTSTRAP
+
+            cat <<'EOF_CLOUDWATCH' > /tmp/task-runner-assets/cloudwatch/cloudwatch-agent-config.json
+            {
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      {
+                        "file_path": "/var/log/runner2.log",
+                        "log_group_name": "DisasterRecovery-Failover-TaskRunner2",
+                        "log_stream_name": "{instance_id}"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            EOF_CLOUDWATCH
 
             chmod +x /tmp/task-runner-assets/bin/*.sh /tmp/task-runner-assets/scripts/bootstrap-golden-image.sh
             cd /tmp/task-runner-assets && bash scripts/bootstrap-golden-image.sh

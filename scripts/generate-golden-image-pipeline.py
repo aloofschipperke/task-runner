@@ -30,6 +30,8 @@ ASSETS = [
      "/tmp/task-runner-assets/bin/runner2.sh"),
     ("EOF_BOOTSTRAP", "scripts/bootstrap-golden-image.sh",
      "/tmp/task-runner-assets/scripts/bootstrap-golden-image.sh"),
+    ("EOF_CLOUDWATCH", "cloudwatch/cloudwatch-agent-config.json",
+     "/tmp/task-runner-assets/cloudwatch/cloudwatch-agent-config.json"),
 ]
 
 
@@ -37,7 +39,7 @@ def build_commands_script() -> str:
     lines = [
         "set -euo pipefail",
         "mkdir -p /tmp/task-runner-assets/systemd /tmp/task-runner-assets/sudoers.d "
-        "/tmp/task-runner-assets/bin /tmp/task-runner-assets/scripts",
+        "/tmp/task-runner-assets/bin /tmp/task-runner-assets/scripts /tmp/task-runner-assets/cloudwatch",
         "",
     ]
     for delimiter, src, dest in ASSETS:

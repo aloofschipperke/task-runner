@@ -22,4 +22,17 @@ install -m 0755 bin/runner2.sh /usr/local/bin/runner2
 
 systemctl daemon-reload
 
+# Install Amazon CloudWatch Agent (RPM-based, compatible with AL2023 and RHEL)
+echo "bootstrap-golden-image: installing amazon-cloudwatch-agent..."
+curl -s -O https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+rpm -U ./amazon-cloudwatch-agent.rpm
+rm -f amazon-cloudwatch-agent.rpm
+
+# Deploy the CloudWatch Agent configuration
+mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+install -m 0644 cloudwatch/cloudwatch-agent-config.json /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+# Fetch configuration and start/enable the agent
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
 echo "bootstrap-golden-image: done. task-runner-user1 will be enabled at boot via cloud-init; task-runner-user2 is left disabled/idle."

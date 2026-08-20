@@ -13,11 +13,20 @@ echo "runner1: starting job ${JOB_ID}"
 
 # ... user1's own work goes here ...
 
+echo "runner1: querying task-runner-user2 status prior to execution"
+prev_invocation="$(systemctl show task-runner-user2.service -p InvocationID --value)"
+
 echo "runner1: triggering task-runner-user2 via broker (blocking until it finishes)"
 sudo /usr/bin/systemctl start --wait task-runner-user2.service || true
 
-# `--wait` only tells us the unit reached "failed" (exit 1) vs deactivated
-# cleanly (exit 0); pull runner2's actual exit code separately.
+curr_invocation="$(systemctl show task-runner-user2.service -p InvocationID --value)"
+
+if [[ -z "${curr_invocation}" || "${curr_invocation}" == "${prev_invocation}" ]]; then
+    echo "runner1: error: task-runner-user2.service failed to initiate" >&2
+    exit 255
+fi
+
+# Query the precise exit code of the execution
 runner2_exit="$(systemctl show task-runner-user2.service -p ExecMainStatus --value)"
 echo "runner1: task-runner-user2 finished with exit code ${runner2_exit}"
 
