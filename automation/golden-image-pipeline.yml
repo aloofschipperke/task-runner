@@ -134,7 +134,8 @@ mainSteps:
             ExecStart=/usr/local/bin/runner2
 
             # Network containment: block the EC2/IMDS metadata endpoint at the kernel level
-            IPAddressDeny=169.254.169.254
+            # Covers both IPv4 and IPv6 IMDS endpoints.
+            IPAddressDeny=169.254.169.254 fd00:ec2::254
 
             # Filesystem containment
             ProtectHome=true
@@ -147,13 +148,21 @@ mainSteps:
             # Kernel / process isolation
             NoNewPrivileges=true
             ProtectControlGroups=true
-            KernelTunables=true
+            ProtectKernelTunables=true
             RestrictRealtime=true
+            ProtectHostname=true
+            ProtectClock=true
+            ProtectProc=invisible
+            ProcSubset=pid
+            RestrictSUIDSGID=true
+            PrivateDevices=true
+            # Prevents creating writable/executable memory mappings (may break JIT like Java/V8)
+            MemoryDenyWriteExecute=true
 
             # Log isolation: route to a file only user1/root can read, keep user2 out
             # of the systemd-journal / adm groups on the golden image.
-            StandardOutput=file:/var/log/runner2.log
-            StandardError=file:/var/log/runner2.log
+            StandardOutput=append:/var/log/runner2.log
+            StandardError=append:/var/log/runner2.log
             SyslogIdentifier=task-runner-user2
             ProtectKernelLogs=true
             EOF_UNIT2
@@ -199,13 +208,19 @@ mainSteps:
                 exit 255
             fi
 
-            # Query the precise exit code of the execution
+            # Query the execution result
+            runner2_result="$(systemctl show task-runner-user2.service -p Result --value)"
             runner2_exit="$(systemctl show task-runner-user2.service -p ExecMainStatus --value)"
-            echo "runner1: task-runner-user2 finished with exit code ${runner2_exit}"
+            echo "runner1: task-runner-user2 finished with result '${runner2_result}' (exit code ${runner2_exit})"
 
-            if [[ "${runner2_exit}" -ne 0 ]]; then
-                echo "runner1: task-runner-user2 failed" >&2
-                exit "${runner2_exit}"
+            if [[ "${runner2_result}" != "success" ]]; then
+                echo "runner1: task-runner-user2 failed (${runner2_result})" >&2
+                # Exit with the underlying exit code if available and non-zero, otherwise 1
+                if [[ "${runner2_exit}" -ne 0 ]]; then
+                    exit "${runner2_exit}"
+                else
+                    exit 1
+                fi
             fi
             EOF_RUNNER1
 

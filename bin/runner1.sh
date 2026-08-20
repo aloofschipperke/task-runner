@@ -26,11 +26,17 @@ if [[ -z "${curr_invocation}" || "${curr_invocation}" == "${prev_invocation}" ]]
     exit 255
 fi
 
-# Query the precise exit code of the execution
+# Query the execution result
+runner2_result="$(systemctl show task-runner-user2.service -p Result --value)"
 runner2_exit="$(systemctl show task-runner-user2.service -p ExecMainStatus --value)"
-echo "runner1: task-runner-user2 finished with exit code ${runner2_exit}"
+echo "runner1: task-runner-user2 finished with result '${runner2_result}' (exit code ${runner2_exit})"
 
-if [[ "${runner2_exit}" -ne 0 ]]; then
-    echo "runner1: task-runner-user2 failed" >&2
-    exit "${runner2_exit}"
+if [[ "${runner2_result}" != "success" ]]; then
+    echo "runner1: task-runner-user2 failed (${runner2_result})" >&2
+    # Exit with the underlying exit code if available and non-zero, otherwise 1
+    if [[ "${runner2_exit}" -ne 0 ]]; then
+        exit "${runner2_exit}"
+    else
+        exit 1
+    fi
 fi

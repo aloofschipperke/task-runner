@@ -11,7 +11,8 @@ Group=user2
 ExecStart=/usr/local/bin/runner2
 
 # Network containment: block the EC2/IMDS metadata endpoint at the kernel level
-IPAddressDeny=169.254.169.254
+# Covers both IPv4 and IPv6 IMDS endpoints.
+IPAddressDeny=169.254.169.254 fd00:ec2::254
 
 # Filesystem containment
 ProtectHome=true
@@ -24,12 +25,20 @@ TemporaryFileSystem=/etc/task_runner_1
 # Kernel / process isolation
 NoNewPrivileges=true
 ProtectControlGroups=true
-KernelTunables=true
+ProtectKernelTunables=true
 RestrictRealtime=true
+ProtectHostname=true
+ProtectClock=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+PrivateDevices=true
+# Prevents creating writable/executable memory mappings (may break JIT like Java/V8)
+MemoryDenyWriteExecute=true
 
 # Log isolation: route to a file only user1/root can read, keep user2 out
 # of the systemd-journal / adm groups on the golden image.
-StandardOutput=file:/var/log/runner2.log
-StandardError=file:/var/log/runner2.log
+StandardOutput=append:/var/log/runner2.log
+StandardError=append:/var/log/runner2.log
 SyslogIdentifier=task-runner-user2
 ProtectKernelLogs=true
